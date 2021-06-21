@@ -1,0 +1,1002 @@
+---
+title: "Proteomics_analysis"
+author: "Hanah M Georges"
+date: "5/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+install.packages("stringi")
+library(dplyr)
+#library(stringi)
+library(tidyr)
+library(stringr)
+library(openxlsx)
+library(DESeq2)
+library(ggplot2)
+
+citation("dplyr")
+citation("tidyr")
+citation("DESeq2")
+citation("ggplot2")
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+Inputs- Change as you see fit 
+```{r}
+cot_counts <- read.xlsx("/Users/hanah/Downloads/NormalizedTotalSpectra_Cotyledon_CategCorr_Bovine_cRAP_OxyM_2MC_042621.xlsx", sheet = 3)
+
+View(car_counts)
+
+car_counts <- read.xlsx("/Users/hanah/Downloads/NormalizedTotalSpectra_Caruncle_CategCorr_Bovine_cRAP_OxyM_2MC_042521.xlsx", sheet = 3)
+
+head(car_counts)
+
+date <- "051721"
+
+output_folder <- "/Users/hanah/Documents/BVDV_Project/Placental_Proteomics/"
+  
+output_file <- paste(date,"SpectralCounts_Analysis", sep = "_")
+
+count_filter <- 10 #the number for filtering unreliable counts
+
+```
+The input needs to be cleaned a bit.
+
+```{r}
+cot_counts <- cot_counts[-1,]
+colnames(cot_counts) <- cot_counts[1,]
+head(cot_counts)
+
+car_counts <- car_counts[-1,]
+colnames(car_counts) <- car_counts[1,]
+head(car_counts)
+```
+
+Normalized Total Spectral Counts from Scaffold have complicated (non-R friendly) Identified Proteins column
+
+```{r}
+cleaned_cotcounts <- cot_counts[-1,]
+cleaned_cotcounts <- separate(cleaned_cotcounts, 1, sep = "=", into = c("Name", "OS", "Org_Code", "Symbol", "PE", "SV"))
+head(cleaned_cotcounts)
+for(i in 1:nrow(cleaned_cotcounts)){
+  cleaned_cotcounts$Name [i] <- str_sub(cleaned_cotcounts$Name [i], 1, nchar(cleaned_cotcounts$Name [i])-3)
+  cleaned_cotcounts$Symbol [i] <- str_sub(cleaned_cotcounts$Symbol[i], 1, nchar(cleaned_cotcounts$Symbol [i])-3)
+}
+cleaned_cotcounts <- cleaned_cotcounts[,-c(2,3,5,6)]
+head(cleaned_cotcounts)
+
+cleaned_carcounts <- car_counts[-1,]
+cleaned_carcounts <- separate(cleaned_carcounts, 1, sep = "=", into = c("Name", "OS", "Org_Code", "Symbol", "PE", "SV"))
+head(cleaned_carcounts)
+for(i in 1:nrow(cleaned_carcounts)){
+  cleaned_carcounts$Name [i] <- str_sub(cleaned_carcounts$Name [i], 1, nchar(cleaned_carcounts$Name [i])-3)
+  cleaned_carcounts$Symbol [i] <- str_sub(cleaned_carcounts$Symbol[i], 1, nchar(cleaned_carcounts$Symbol [i])-3)
+}
+cleaned_carcounts <- cleaned_carcounts[,-c(2,3,5,6)]
+head(cleaned_carcounts)
+View(cleaned_carcounts)
+```
+
+Now that the spectral counts are more manageable, we can set up for DESeq2 analysis.
+First, the sample dataframe which we will extract from the column information
+
+```{r}
+cot_samples_list <- list()
+dim(cleaned_cotcounts)
+cot_samples_list <- colnames(cleaned_cotcounts[6:ncol(cleaned_cotcounts)])
+head(cot_samples_list)
+cot_samples <- as.data.frame(cot_samples_list)
+cot_samples <- separate(cot_samples, 1, sep = "-", into = c("RunID", "AnimalID", "Tissue", "Treatment", "Day"))
+head(cot_samples)
+
+#View(cot_samples)
+
+car_samples_list <- list()
+dim(cleaned_carcounts)
+car_samples_list <- colnames(cleaned_carcounts[6:ncol(cleaned_carcounts)])
+head(car_samples_list)
+car_samples <- as.data.frame(car_samples_list)
+car_samples <- separate(car_samples, 1, sep = "-", into = c("RunID", "AnimalID", "Tissue", "Treatment", "Day"))
+head(car_samples)
+class(car_samples$AnimalID [1])
+
+View(car_samples)
+View(cot_samples)
+
+#A sample was mislabeled at the proteomics core. Caruncle from Animal 306 is d82 control and needs to be fixed. Also, one "Ctl" was labeled as "control" which needs to be changed to "Ctl".
+
+for(i in 1:nrow(car_samples)){
+  animal <- car_samples$AnimalID [i]
+  trt <- car_samples$Treatment [i]
+  if(animal == "306"){
+    car_samples$Day [i] <- "82"
+    car_samples$Treatment [i] <- "Control"
+  } else(print("Ok"))
+  if(trt == "Control"){
+    car_samples$Treatment [i] <- "Ctl"
+  } else(print("Ok"))
+}
+
+#cot_samples <- as.matrix(cot_samples)
+rownames(cot_samples) <- cot_samples_list
+#car_samples <- as.matrix(car_samples)
+rownames(car_samples) <- car_samples_list
+View(car_samples)
+
+
+```
+
+Next, the counts data needs to be formatted into a numerical matrix
+
+```{r}
+#View(cleaned_cotcounts)
+cleaned_cotcounts2 <- cleaned_cotcounts
+rownames(cleaned_cotcounts2) <- make.names(cleaned_cotcounts2$`Alternate ID`, unique = TRUE)
+head(cleaned_cotcounts2)
+cot_annotation <- cleaned_cotcounts2[,c(1:5)]
+cleaned_cotcounts2 <- cleaned_cotcounts2[,-c(1:5)]
+head(cleaned_cotcounts2)
+dim(cleaned_cotcounts2)
+cleaned_cotcounts2 <- data.matrix(cleaned_cotcounts2)
+cot_keep <- rowSums(cleaned_cotcounts2) > count_filter
+cleaned_cotcounts2 <- cleaned_cotcounts2[cot_keep,]
+dim(cleaned_cotcounts2)
+
+cleaned_carcounts2 <- cleaned_carcounts
+rownames(cleaned_carcounts2) <- make.names(cleaned_carcounts2$`Alternate ID`, unique = TRUE)
+head(cleaned_carcounts2)
+car_annotation <- cleaned_carcounts2[,c(1:5)]
+cleaned_carcounts2 <- cleaned_carcounts2[,-c(1:5)]
+head(cleaned_carcounts2)
+cleaned_carcounts2 <- (data.matrix(cleaned_carcounts2))
+dim(cleaned_carcounts2)
+car_keep <- rowSums(cleaned_carcounts2) > count_filter
+cleaned_carcounts2 <- cleaned_carcounts2[car_keep,]
+dim(cleaned_carcounts2)
+
+```
+
+The column names (sample info) in the counts matrix need to be in the same order as the row names in the sample dataframe
+
+```{r}
+all(rownames(cot_samples) == colnames(cleaned_cotcounts2)) #should be TRUE
+head(cleaned_cotcounts2)
+cot_samples2 <- cot_samples[,-c(1,2,3)]
+head(cot_samples)
+
+all(rownames(car_samples) == colnames(cleaned_carcounts2)) #should be TRUE
+head(cleaned_carcounts2)
+car_samples2 <- car_samples[,-c(1,2,3)]
+head(car_samples)
+
+cot_samples2$Day <- factor(cot_samples2$Day)
+cot_samples2$Treatment <- factor(cot_samples2$Treatment)
+
+car_samples2$Day <- factor(car_samples2$Day)
+car_samples2$Treatment <- factor(car_samples2$Treatment)
+
+table(car_samples2)
+table(cot_samples2)
+
+
+```
+
+Next is to start DESeq set up
+This is for ANOVA Set up
+```{r}
+cot_samples2$Treatment
+cot_samples2$Day
+cot_samples2$Day <- relevel(cot_samples2$Day, ref = "82")
+anova_cot_dds <- DESeqDataSetFromMatrix(countData = cleaned_cotcounts2,
+                                  colData = cot_samples2, 
+                                  design = ~ Day + Treatment + Day:Treatment)
+
+anova_cot_dds <- DESeq(anova_cot_dds)
+resultsNames(anova_cot_dds)
+
+anova_cot_res_all <- results(anova_cot_dds)
+anova_cot_res_d82 <- results(anova_cot_dds, name = "Treatment_PI_vs_Ctl")
+anova_cot_res_d89 <- results(anova_cot_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day89.TreatmentPI")))
+anova_cot_res_d97 <- results(anova_cot_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day97.TreatmentPI")))
+anova_cot_res_d190 <- results(anova_cot_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day190.TreatmentPI")))
+anova_cot_res_d245 <- results(anova_cot_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day245.TreatmentPI")))
+
+car_samples2$Treatment
+car_samples2$Day
+car_samples2$Day <- relevel(car_samples2$Day, ref = "82")
+anova_car_dds <- DESeqDataSetFromMatrix(countData = cleaned_carcounts2,
+                                  colData = car_samples2, 
+                                  design = ~ Day + Treatment + Day:Treatment)
+
+anova_car_dds <- DESeq(anova_car_dds)
+resultsNames(anova_car_dds)
+
+anova_car_res_all <- results(anova_car_dds)
+anova_car_res_d82 <- results(anova_car_dds, name = "Treatment_PI_vs_Ctl")
+anova_car_res_d89 <- results(anova_car_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day89.TreatmentPI")))
+anova_car_res_d97 <- results(anova_car_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day97.TreatmentPI")))
+anova_car_res_d190 <- results(anova_car_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day190.TreatmentPI")))
+anova_car_res_d245 <- results(anova_car_dds, contrast = list(c("Treatment_PI_vs_Ctl", "Day245.TreatmentPI")))
+```
+
+This is for T Test set up
+```{r}
+cot_dds <- DESeqDataSetFromMatrix(countData = cleaned_cotcounts2,
+                                  colData = cot_samples2, 
+                                  design = ~ Day + Treatment)
+
+cot_dds
+
+car_dds <- DESeqDataSetFromMatrix(countData = cleaned_carcounts2,
+                                  colData = car_samples2, 
+                                  design = ~ Day + Treatment)
+
+car_dds
+```
+
+Prefiltering for rows that have > 10 counts and set "Ctl" treatment as reference
+
+```{r}
+cot_keep <- rowSums(counts(cot_dds)) > count_filter
+cot_dds <- cot_dds[cot_keep,]
+cot_dds$Treatment <- relevel(cot_dds$Treatment, ref = "Ctl")
+
+car_keep <- rowSums(counts(car_dds)) > count_filter
+car_dds <- car_dds[car_keep,]
+car_dds$Treatment <- relevel(car_dds$Treatment, ref = "Ctl")
+```
+
+Comparisons
+This is general PI vs. Control over all days
+```{r}
+cot_dds <- DESeq(cot_dds)
+cot_res <- results(cot_dds)
+cot_res
+
+
+car_dds <- DESeq(car_dds)
+car_res <- results(car_dds)
+car_res
+
+```
+Setting up day comparisons. Need to first change the design to Treatment only
+
+```{r}
+cot_dds_day <- DESeqDataSetFromMatrix(countData = cleaned_cotcounts2,
+                                  colData = cot_samples2, 
+                                  design = ~ Treatment)
+
+#cot_dds
+
+car_dds_day <- DESeqDataSetFromMatrix(countData = cleaned_carcounts2,
+                                  colData = car_samples2, 
+                                  design = ~ Treatment)
+
+cot_d82_dds <- cot_dds_day[,cot_dds_day$Day == "82"]
+cot_d82_dds$Day <- droplevels(cot_d82_dds$Day)
+cot_d82_dds$Treatment <- relevel(cot_d82_dds$Treatment, "Ctl")
+head(cot_d82_dds)
+as.data.frame((colData(cot_d82_dds)))
+
+cot_d89_dds <- cot_dds_day[,cot_dds_day$Day == "89"]
+cot_d89_dds$Day <- droplevels(cot_d89_dds$Day)
+cot_d89_dds$Treatment <- relevel(cot_d89_dds$Treatment, "Ctl")
+head(cot_d89_dds)
+as.data.frame((colData(cot_d89_dds)))
+
+cot_d97_dds <- cot_dds_day[,cot_dds_day$Day == "97"]
+cot_d97_dds$Day <- droplevels(cot_d97_dds$Day)
+cot_d97_dds$Treatment <- relevel(cot_d97_dds$Treatment, "Ctl")
+head(cot_d97_dds)
+as.data.frame((colData(cot_d97_dds)))
+
+cot_d97_dds <- cot_dds_day[,cot_dds_day$Day == "97"]
+cot_d97_dds$Day <- droplevels(cot_d97_dds$Day)
+cot_d97_dds$Treatment <- relevel(cot_d97_dds$Treatment, "Ctl")
+head(cot_d97_dds)
+as.data.frame((colData(cot_d97_dds)))
+
+cot_d190_dds <- cot_dds_day[,cot_dds_day$Day == "190"]
+cot_d190_dds$Day <- droplevels(cot_d190_dds$Day)
+cot_d190_dds$Treatment <- relevel(cot_d190_dds$Treatment, "Ctl")
+head(cot_d190_dds)
+as.data.frame((colData(cot_d190_dds)))
+
+cot_d245_dds <- cot_dds_day[,cot_dds_day$Day == "245"]
+cot_d245_dds$Day <- droplevels(cot_d245_dds$Day)
+cot_d245_dds$Treatment <- relevel(cot_d245_dds$Treatment, "Ctl")
+head(cot_d245_dds)
+as.data.frame((colData(cot_d245_dds)))
+
+## Caruncles ##
+car_d82_dds <- car_dds_day[,car_dds_day$Day == "82"]
+car_d82_dds$Day <- droplevels(car_d82_dds$Day)
+car_d82_dds$Treatment <- relevel(car_d82_dds$Treatment, "Ctl")
+head(car_d82_dds)
+as.data.frame((colData(car_d82_dds)))
+
+car_d89_dds <- car_dds_day[,car_dds_day$Day == "89"]
+car_d89_dds$Day <- droplevels(car_d89_dds$Day)
+car_d89_dds$Treatment <- relevel(car_d89_dds$Treatment, "Ctl")
+head(car_d89_dds)
+as.data.frame((colData(car_d89_dds)))
+
+car_d97_dds <- car_dds_day[,car_dds_day$Day == "97"]
+car_d97_dds$Day <- droplevels(car_d97_dds$Day)
+car_d97_dds$Treatment <- relevel(car_d97_dds$Treatment, "Ctl")
+head(car_d97_dds)
+as.data.frame((colData(car_d97_dds)))
+
+car_d97_dds <- car_dds_day[,car_dds_day$Day == "97"]
+car_d97_dds$Day <- droplevels(car_d97_dds$Day)
+car_d97_dds$Treatment <- relevel(car_d97_dds$Treatment, "Ctl")
+head(car_d97_dds)
+as.data.frame((colData(car_d97_dds)))
+
+car_d190_dds <- car_dds_day[,car_dds_day$Day == "190"]
+car_d190_dds$Day <- droplevels(car_d190_dds$Day)
+car_d190_dds$Treatment <- relevel(car_d190_dds$Treatment, "Ctl")
+head(car_d190_dds)
+as.data.frame((colData(car_d190_dds)))
+
+car_d245_dds <- car_dds_day[,car_dds_day$Day == "245"]
+car_d245_dds$Day <- droplevels(car_d245_dds$Day)
+car_d245_dds$Treatment <- relevel(car_d245_dds$Treatment, "Ctl")
+head(car_d245_dds)
+as.data.frame((colData(car_d245_dds)))
+```
+Running analysis on all day comparisons
+
+```{r}
+cot_d82_dds <- DESeq(cot_d82_dds)
+cot_d89_dds <- DESeq(cot_d89_dds)
+cot_d97_dds <- DESeq(cot_d97_dds)
+cot_d190_dds <- DESeq(cot_d190_dds)
+cot_d245_dds <- DESeq(cot_d245_dds)
+
+car_d82_dds <- DESeq(car_d82_dds)
+car_d89_dds <- DESeq(car_d89_dds)
+car_d97_dds <- DESeq(car_d97_dds)
+car_d190_dds <- DESeq(car_d190_dds)
+car_d245_dds <- DESeq(car_d245_dds)
+
+## Results Tables ##
+cot_d82_res <- results(cot_d82_dds)
+cot_d89_res <- results(cot_d89_dds)
+cot_d97_res <- results(cot_d97_dds)
+cot_d190_res <- results(cot_d190_dds)
+cot_d245_res <- results(cot_d245_dds)
+
+car_d82_res <- results(car_d82_dds)
+car_d89_res <- results(car_d89_dds)
+car_d97_res <- results(car_d97_dds)
+car_d190_res <- results(car_d190_dds)
+car_d245_res <- results(car_d245_dds)
+
+cot_d82_res
+mcols(cot_d82_res, use.names = TRUE) #look at metadata
+sum(cot_res$padj < 0.1, na.rm = TRUE)
+
+```
+
+some plots
+
+```{r}
+#dev.off() #turn off until there is an error
+pdf(paste(output_folder, output_file, "plots", ".pdf", sep="_"))
+
+hist(cot_res$padj, breaks = 20, col="grey")
+plotDispEsts(cot_dds)
+plotMA(cot_res, ylim = c(-1,1))
+
+hist(car_res$padj, breaks = 20, col="grey")
+plotDispEsts(car_dds)
+plotMA(car_res, ylim = c(-1,1))
+
+hist(cot_d82_res$padj, breaks = 20, col="grey")
+plotDispEsts(cot_d82_dds)
+plotMA(cot_d82_res, ylim = c(-1,1))
+
+hist(cot_d89_res$padj, breaks = 20, col="grey")
+hist(cot_d89_res$pvalue, breaks = 20, col="grey")
+plotDispEsts(cot_d89_dds)
+plotMA(cot_d89_res, ylim = c(-1,1))
+
+hist(cot_d97_res$padj, breaks = 20, col="grey")
+plotDispEsts(cot_d97_dds)
+plotMA(cot_d97_res, ylim = c(-1,1))
+
+hist(cot_d190_res$padj, breaks = 20, col="grey")
+plotDispEsts(cot_d190_dds)
+plotMA(cot_d190_res, ylim = c(-1,1))
+
+hist(cot_d245_res$padj, breaks = 20, col="grey")
+plotDispEsts(cot_d245_dds)
+plotMA(cot_d245_res, ylim = c(-1,1))
+
+hist(car_d82_res$padj, breaks = 20, col="grey")
+plotDispEsts(car_d82_dds)
+plotMA(car_d82_res, ylim = c(-1,1))
+
+hist(car_d89_res$padj, breaks = 20, col="grey")
+plotDispEsts(car_d89_dds)
+plotMA(car_d89_res, ylim = c(-1,1))
+
+hist(car_d97_res$padj, breaks = 20, col="grey")
+plotDispEsts(car_d97_dds)
+plotMA(car_d97_res, ylim = c(-1,1))
+
+hist(car_d190_res$padj, breaks = 20, col="grey")
+plotDispEsts(car_d190_dds)
+plotMA(car_d190_res, ylim = c(-1,1))
+
+hist(car_d245_res$padj, breaks = 20, col="grey")
+plotDispEsts(car_d245_dds)
+plotMA(car_d245_res, ylim = c(-1,1))
+
+cot_rld <- rlog(cot_dds)
+car_rld <- rlog(car_dds)
+cot_d82_rld <- rlog(cot_d82_dds)
+cot_d89_rld <- rlog(cot_d89_dds)
+cot_d97_rld <- rlog(cot_d97_dds)
+cot_d190_rld <- rlog(cot_d190_dds)
+cot_d245_rld <- rlog(cot_d245_dds)
+
+car_d82_rld <- rlog(car_d82_dds)
+car_d89_rld <- rlog(car_d89_dds)
+car_d97_rld <- rlog(car_d97_dds)
+car_d190_rld <- rlog(car_d190_dds)
+car_d245_rld <- rlog(car_d245_dds)
+
+# plotPCA(cot_rld, intgroup = c("Day", "Treatment"))
+# plotPCA(car_rld, intgroup = c("Day", "Treatment"))
+# plotPCA(cot_d82_rld, intgroup = c("Day", "Treatment"))
+# plotPCA(cot_d89_rld, intgroup = c("Day", "Treatment"))
+
+pcaData <- plotPCA(cot_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("All Days Cotyledon PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(car_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("All Days Caruncle PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(cot_d82_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d82 Cotyledon PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(cot_d89_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d89 Cotyledon PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(cot_d97_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d97 Cotyledon PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(cot_d190_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d190 Cotyledon PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(cot_d245_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d245 Cotyledon PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(car_d82_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d82 Caruncle PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(car_d89_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d89 Caruncle PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(car_d97_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d97 Caruncle PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(car_d190_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d190 Caruncle PI v. Control") +
+  coord_fixed()
+
+pcaData <- plotPCA(car_d245_rld, intgroup = c("Day", "Treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = Treatment, shape = Day)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("d245 Caruncle PI v. Control") +
+  coord_fixed()
+
+par(mar = c(8,5,2,2))
+
+while(!is.null(dev.list())) dev.off()
+pdf(paste(output_folder, output_file, "box_plots", ".pdf", sep="_"))
+boxplot(log10(assays(anova_cot_dds)[["cooks"]]), range = 0, las=2)
+boxplot(log10(assays(anova_car_dds)[["cooks"]]), range=0, las=2)
+dev.off()
+
+
+# plotCounts(cot_dds, gene=which.min(cot_res$padj), intgroup = "Treatment")
+# 
+# plotPCA(cot_dds, intgroup=c("Day", "Treatment"))
+```
+
+Merge annotation with DESeq results- getting ready for export
+```{r}
+head(anova_cot_res_all)
+head(cot_annotation)
+anova_cot_df <- as.data.frame(anova_cot_res_all)
+anova_cot_res_merged <- merge(cot_annotation, cot_df, by=0, all=TRUE)
+head(cot_res_merged)
+
+anova_car_df <- as.data.frame(anova_car_res_all)
+anova_car_res_merged <- merge(car_annotation, car_df, by=0, all=TRUE)
+head(anova_car_res_merged)
+
+anova_cot_82_df <- as.data.frame(anova_cot_res_d82)
+anova_cot_82_res_merged <- merge(cot_annotation, anova_cot_82_df, by=0, all=TRUE)
+head(anova_cot_82_res_merged)
+
+anova_cot_89_df <- as.data.frame(anova_cot_res_d89)
+anova_cot_89_res_merged <- merge(cot_annotation, anova_cot_89_df, by=0, all=TRUE)
+head(anova_cot_89_res_merged)
+
+anova_cot_97_df <- as.data.frame(anova_cot_res_d97)
+anova_cot_97_res_merged <- merge(cot_annotation, anova_cot_97_df, by=0, all=TRUE)
+head(anova_cot_97_res_merged)
+
+anova_cot_190_df <- as.data.frame(anova_cot_res_d190)
+anova_cot_190_res_merged <- merge(cot_annotation, anova_cot_190_df, by=0, all=TRUE)
+head(anova_cot_190_res_merged)
+
+anova_cot_245_df <- as.data.frame(anova_cot_res_d245)
+anova_cot_245_res_merged <- merge(cot_annotation, anova_cot_245_df, by=0, all=TRUE)
+head(anova_cot_245_res_merged)
+
+anova_car_82_df <- as.data.frame(anova_car_res_d82)
+anova_car_82_res_merged <- merge(car_annotation, anova_car_82_df, by=0, all=TRUE)
+head(anova_car_82_res_merged)
+
+anova_car_89_df <- as.data.frame(anova_car_res_d89)
+anova_car_89_res_merged <- merge(car_annotation, anova_car_89_df, by=0, all=TRUE)
+head(anova_car_89_res_merged)
+
+anova_car_97_df <- as.data.frame(anova_car_res_d97)
+anova_car_97_res_merged <- merge(car_annotation, anova_car_97_df, by=0, all=TRUE)
+head(anova_car_97_res_merged)
+
+anova_car_190_df <- as.data.frame(anova_car_res_d190)
+anova_car_190_res_merged <- merge(car_annotation, anova_car_190_df, by=0, all=TRUE)
+head(anova_car_190_res_merged)
+
+anova_car_245_df <- as.data.frame(anova_car_res_d245)
+anova_car_245_res_merged <- merge(car_annotation, anova_car_245_df, by=0, all=TRUE)
+head(anova_car_245_res_merged)
+
+head(cleaned_cotcounts2)
+cot_raw <- as.data.frame(cleaned_cotcounts2)
+cot_raw <- merge(cot_annotation, cleaned_cotcounts2, by = 0, all=TRUE)
+
+car_raw <- as.data.frame(cleaned_carcounts2)
+car_raw <- merge(car_annotation, cleaned_carcounts2, by = 0, all=TRUE)
+```
+
+
+```{r}
+head(cot_res)
+head(cot_annotation)
+cot_df <- as.data.frame(cot_res)
+cot_res_merged <- merge(cot_annotation, cot_df, by=0, all=TRUE)
+head(cot_res_merged)
+
+car_df <- as.data.frame(car_res)
+car_res_merged <- merge(car_annotation, car_df, by=0, all=TRUE)
+head(car_res_merged)
+
+cot_82_df <- as.data.frame(cot_d82_res)
+cot_82_res_merged <- merge(cot_annotation, cot_82_df, by=0, all=TRUE)
+head(cot_82_res_merged)
+
+cot_89_df <- as.data.frame(cot_d89_res)
+cot_89_res_merged <- merge(cot_annotation, cot_89_df, by=0, all=TRUE)
+head(cot_89_res_merged)
+
+cot_97_df <- as.data.frame(cot_d97_res)
+cot_97_res_merged <- merge(cot_annotation, cot_97_df, by=0, all=TRUE)
+head(cot_97_res_merged)
+
+cot_190_df <- as.data.frame(cot_d190_res)
+cot_190_res_merged <- merge(cot_annotation, cot_190_df, by=0, all=TRUE)
+head(cot_190_res_merged)
+
+cot_245_df <- as.data.frame(cot_d245_res)
+cot_245_res_merged <- merge(cot_annotation, cot_245_df, by=0, all=TRUE)
+head(cot_245_res_merged)
+
+car_82_df <- as.data.frame(car_d82_res)
+car_82_res_merged <- merge(car_annotation, car_82_df, by=0, all=TRUE)
+head(car_82_res_merged)
+
+car_89_df <- as.data.frame(car_d89_res)
+car_89_res_merged <- merge(car_annotation, car_89_df, by=0, all=TRUE)
+head(car_89_res_merged)
+
+car_97_df <- as.data.frame(car_d97_res)
+car_97_res_merged <- merge(car_annotation, car_97_df, by=0, all=TRUE)
+head(car_97_res_merged)
+
+car_190_df <- as.data.frame(car_d190_res)
+car_190_res_merged <- merge(car_annotation, car_190_df, by=0, all=TRUE)
+head(car_190_res_merged)
+
+car_245_df <- as.data.frame(car_d245_res)
+car_245_res_merged <- merge(car_annotation, car_245_df, by=0, all=TRUE)
+head(car_245_res_merged)
+```
+Export to Excel
+```{r}
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d82")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_car_82_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d89")
+freezePane(XL, sheet = 2, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 2, anova_car_89_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d97")
+freezePane(XL, sheet = 3, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 3, anova_car_97_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d190")
+freezePane(XL, sheet = 4, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 4, anova_car_190_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d245")
+freezePane(XL, sheet = 5, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 5, anova_car_245_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d82")
+freezePane(XL, sheet = 6, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 6, anova_cot_82_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d89")
+freezePane(XL, sheet = 7, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 7, anova_cot_89_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d97")
+freezePane(XL, sheet = 8, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 8, anova_cot_97_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d190")
+freezePane(XL, sheet = 9, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 9, anova_cot_190_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d245")
+freezePane(XL, sheet = 10, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 10, anova_cot_245_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_AllDays")
+freezePane(XL, sheet = 11, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 11, anova_car_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_AllDays")
+freezePane(XL, sheet = 12, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 12, anova_cot_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_Raw_Counts")
+freezePane(XL, sheet = 13, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 13, cleaned_carcounts)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_Raw_Counts")
+freezePane(XL, sheet = 14, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 14, cleaned_cotcounts)
+openxlsx::saveWorkbook(XL, file = file.path(paste(output_folder, output_file,c("ANOVA.xlsx"), sep = "_")))
+
+
+```
+
+
+```{r}
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d82")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_car_82_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d82_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d89")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_car_89_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d89_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d97")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_car_97_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d97_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d190")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_car_190_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d190_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d245")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_car_245_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d245_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "cot_d82")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_cot_82_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d82_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "cot_d89")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_cot_89_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d89_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "cot_d97")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_cot_97_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d97_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "cot_d190")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_cot_190_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d190_anova_051821.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "cot_d245")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, anova_cot_245_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d245_anova_051821.xlsx"))
+
+
+```
+
+```{r}
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d82")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, car_82_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d89")
+freezePane(XL, sheet = 2, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 2, car_89_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d97")
+freezePane(XL, sheet = 3, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 3, car_97_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d190")
+freezePane(XL, sheet = 4, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 4, car_190_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d245")
+freezePane(XL, sheet = 5, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 5, car_245_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d82")
+freezePane(XL, sheet = 6, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 6, cot_82_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d89")
+freezePane(XL, sheet = 7, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 7, cot_89_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d97")
+freezePane(XL, sheet = 8, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 8, cot_97_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d190")
+freezePane(XL, sheet = 9, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 9, cot_190_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d245")
+freezePane(XL, sheet = 10, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 10, cot_245_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_AllDays")
+freezePane(XL, sheet = 11, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 11, car_res_merged)
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_AllDays")
+freezePane(XL, sheet = 12, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 12, cot_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(paste(output_folder, output_file, ".xlsx", sep = "_"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d82")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, car_82_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d82_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d89")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, car_89_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d89_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d97")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, car_97_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d97_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d190")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, car_190_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d190_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Car_d245")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, car_245_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "car_d245_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d82")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, cot_82_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d82_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d89")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, cot_89_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d89_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d97")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, cot_97_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d97_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d190")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, cot_190_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d190_051921.xlsx"))
+
+XL <- openxlsx::createWorkbook()
+
+Merged_sheet <- addWorksheet(XL, sheetName = "Cot_d245")
+freezePane(XL, sheet = 1, firstRow = TRUE, firstCol = TRUE)
+writeDataTable(XL, sheet = 1, cot_245_res_merged)
+
+openxlsx::saveWorkbook(XL, file = file.path(output_folder, "cot_d245_051921.xlsx"))
+
+
+```
+
+
+
+
+
+
+
+
